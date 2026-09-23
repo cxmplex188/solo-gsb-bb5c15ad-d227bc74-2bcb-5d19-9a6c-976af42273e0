@@ -1213,6 +1213,7 @@ function auditPlan(rows, cols, labels, steps) {
 
   const count = (sev) => findings.filter((f) => f.severity === sev).length;
   const errors = count('error');
+  const clusterView = buildAuditClusters(findings);
   return {
     ok: true,
     verdict: errors > 0 ? 'fail' : 'pass',
@@ -1226,8 +1227,302 @@ function auditPlan(rows, cols, labels, steps) {
       labeledFaces,
       blankFaces: blanks.length
     },
-    findings
+    findings,
+    // 问题聚类为只读视图：由 findings 确定性派生，绝不改动上述原始审计结论；
+    // 同方案重算结果一致（可随版本快照复现），跨重算的簇身份复用见 reconcileAuditClusters。
+    clusters: clusterView.clusters,
+    clusterSummary: clusterView.summary
   };
+}
+
+// ---------- 审计问题聚类（只读视图） ----------
+/**
+ * 将“同一审计规则”的结果按空间邻接关系合并为问题簇：
+ *   · 相邻阅读槽位：同一叠层内槽位号相差 1；
+ *   · 共享原始纸格：成员涉及的原始纸格 id 有交集（可传递，经并查集）。
+ * 不同规则（如倒置与空白）永不合并；聚类纯确定性，不依赖任何运行态/时间戳，
+ * 因此同一方案任意时刻、任意端重算结果一致，可随方案版本快照复现。
+ *
+ * 成员稳定 key（与页码文案解耦：改页码不改身份，槽位/纸格才是身份）：
+ *   槽位类   `${rule}|s${stack}:${slot}:${cell}:${face}`
+ *   纸格类   `${rule}|c${cell}`
+ *   全局类   `${rule}|g`（容量/分离叠层，无单一纸格身份）
+ * 簇 key = 规则 + 成员 key 集合内容哈希，成员集合不变则簇身份不变。
+ */
+const SEV_RANK = { error: 0, warning: 1, info: 2 };
+const AUDIT_FACE_NAME = { front: '正面', back: '反面' };
+
+function fnv1aHex(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    let c = str.charCodeAt(i);
+    // 代理对合并为码点（key 实际全 ASCII，这里仅做防御）
+    if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) {
+      const c2 = str.charCodeAt(i + 1);
+      if (c2 >= 0xdc00 && c2 <= 0xdfff) {
+        c = 0x10000 + ((c - 0xd800) << 10) + (c2 - 0xdc00);
+        i++;
+      }
+    }
+    const bytes = c < 0x80 ? [c]
+      : c < 0x800 ? [0xc0 | (c >> 6), 0x80 | (c & 0x3f)]
+        : c < 0x10000 ? [0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f)]
+          : [0xf0 | (c >> 18), 0x80 | ((c >> 12) & 0x3f), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f)];
+    for (const b of bytes) {
+      h ^= b;
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+  }
+  return 'h' + h.toString(16).padStart(8, '0');
+}
+
+/**
+ * 把一条审计 finding 展开为一个或多个簇成员。
+ * 槽位类规则（倒置/空白/重复页码）按“每次出现”拆分，
+ * 其余规则一条 finding 即一个成员；成员是只读投影，不回写 finding。
+ */
+function auditFindingMembers(f) {
+  const mkSlot = (d, rule, note) => ({
+    key: `${rule}|s${d.stack}:${d.slot}:${d.cell}:${d.face}`,
+    rule, severity: f.severity, title: f.title,
+    cells: [d.cell],
+    slots: [{
+      stack: d.stack, slot: d.slot, cell: d.cell, face: d.face,
+      label: d.label == null ? null : String(d.label)
+    }],
+    note
+  });
+  switch (f.id) {
+    case 'inverted_page':
+    case 'blank_page':
+      return [mkSlot(f.details[0], f.id, f.message)];
+    case 'duplicate_page': {
+      // details 为该页码的全部出现位置（{cell,face,slot,stack}）
+      return (Array.isArray(f.details) ? f.details : []).map((d) => {
+        const label = d.label == null ? '' : String(d.label);
+        const slotText = `阅读序列第 ${d.slot} 槽`;
+        const note = `页码 “${label}”：原格(${d.cell})·${AUDIT_FACE_NAME[d.face] || d.face}` +
+          `（${slotText}）。`;
+        return mkSlot({ ...d, label }, f.id, note);
+      });
+    }
+    case 'uncovered_cell': {
+      const cell = f.cells[0];
+      return [{
+        key: `${f.id}|c${cell}`, rule: f.id, severity: f.severity, title: f.title,
+        cells: [cell], slots: [], note: f.message
+      }];
+    }
+    default: {
+      // split_stacks / capacity_mismatch / capacity_multiple：全局成员，
+      // 不与任何具体槽位/纸格邻接（分离叠层各叠之间也不共享原格），
+      // 故始终自成一簇；split_stacks 带上各叠槽位区间供展示。
+      const slots = [];
+      if (f.id === 'split_stacks' && Array.isArray(f.details)) {
+        for (const d of f.details) {
+          for (let n = 1; n <= 2 * d.depth; n++) {
+            slots.push({ stack: d.stack, slot: n, cell: null, face: null, label: null });
+          }
+        }
+      }
+      return [{
+        key: `${f.id}|g`, rule: f.id, severity: f.severity, title: f.title,
+        cells: [...f.cells], slots, note: f.message
+      }];
+    }
+  }
+}
+
+/**
+ * 由审计 findings 构建确定性问题簇（无历史上下文时簇 cid 按排序规范编号 c1..cN；
+ * 跨重算的身份复用见 reconcileAuditClusters）。
+ * @returns {clusters:[], summary:{clusters,members,errors,warnings,infos}}
+ */
+function buildAuditClusters(findings) {
+  const list = Array.isArray(findings) ? findings : [];
+  const members = [];
+  for (const f of list) {
+    if (!f || typeof f.id !== 'string') continue;
+    for (const m of auditFindingMembers(f)) members.push(m);
+  }
+  // 稳定排序：规则 → 成员 key，保证并查集与输出顺序确定
+  members.sort((a, b) => (a.rule < b.rule ? -1 : a.rule > b.rule ? 1 : 0)
+    || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+
+  const parent = members.map((_, i) => i);
+  const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+  const union = (i, j) => {
+    const ri = find(i), rj = find(j);
+    if (ri === rj) return;
+    // 根取较小下标，结果与遍历顺序无关
+    if (ri < rj) parent[rj] = ri; else parent[ri] = rj;
+  };
+  const adjacentSlot = (a, b) => {
+    const sa = a.slots[0], sb = b.slots[0];
+    return !!sa && !!sb && sa.stack === sb.stack && Math.abs(sa.slot - sb.slot) === 1
+      && sa.cell !== null && sb.cell !== null;
+  };
+  const sharesCell = (a, b) => {
+    if (!a.cells.length || !b.cells.length) return false;
+    const set = b.cells.length >= a.cells.length ? new Set(a.cells) : new Set(b.cells);
+    const other = b.cells.length >= a.cells.length ? b.cells : a.cells;
+    return other.some((c) => set.has(c));
+  };
+  // 仅同规则成员之间按“相邻槽位 / 共享原始纸格”连边（含并查集传递合并）
+  let runStart = 0;
+  for (let i = 0; i <= members.length; i++) {
+    if (i < members.length && members[i].rule === members[runStart].rule) continue;
+    for (let a = runStart; a < i; a++) {
+      for (let b = a + 1; b < i; b++) {
+        if (adjacentSlot(members[a], members[b]) || sharesCell(members[a], members[b])) union(a, b);
+      }
+    }
+    runStart = i;
+  }
+
+  const groups = new Map();
+  members.forEach((m, i) => {
+    const r = find(i);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r).push(m);
+  });
+
+  const clusters = [];
+  for (const groupMembers of groups.values()) {
+    const keySet = groupMembers.map((m) => m.key).sort();
+    const rule = groupMembers[0].rule;
+    const cellSet = new Set();
+    const slotIndex = new Map();
+    const noteSet = new Set();
+    let severity = groupMembers[0].severity;
+    let title = groupMembers[0].title;
+    for (const m of groupMembers) {
+      if (SEV_RANK[m.severity] < SEV_RANK[severity]) severity = m.severity;
+      for (const c of m.cells) cellSet.add(c);
+      for (const s of m.slots) {
+        slotIndex.set(`${s.stack}:${s.slot}`, s);
+      }
+      if (m.note) noteSet.add(m.note);
+    }
+    const cells = [...cellSet].sort();
+    const slots = [...slotIndex.values()].sort((a, b) =>
+      (a.stack - b.stack) || (a.slot - b.slot));
+    clusters.push({
+      cid: null,
+      key: `${rule}|${fnv1aHex(keySet.join(';'))}`,
+      rule, title, severity,
+      cells,
+      slots,
+      memberCount: groupMembers.length,
+      members: groupMembers.map((m) => ({
+        key: m.key, severity: m.severity, rule: m.rule, title: m.title,
+        cells: [...m.cells], slots: m.slots.map((s) => ({ ...s })), note: m.note
+      })),
+      notes: [...noteSet].sort()
+    });
+  }
+  // 稳定排序：严重级别 → 规则 → 成员数（多在前）→ 簇 key
+  clusters.sort((a, b) => SEV_RANK[a.severity] - SEV_RANK[b.severity]
+    || (a.rule < b.rule ? -1 : a.rule > b.rule ? 1 : 0)
+    || b.memberCount - a.memberCount
+    || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  clusters.forEach((c, i) => { c.cid = `c${i + 1}`; });
+
+  const count = (sev) => clusters.filter((c) => c.severity === sev).length;
+  return {
+    clusters,
+    summary: {
+      clusters: clusters.length,
+      members: members.length,
+      errors: count('error'),
+      warnings: count('warning'),
+      infos: count('info')
+    }
+  };
+}
+
+/**
+ * 重算后按稳定成员 key 复用簇身份（一对一贪心匹配，绝不把多个新簇误并到同一旧簇）：
+ *   1. 成员集合完全相同（簇 key 相等）的优先原样复用；
+ *   2. 其余按共享成员数从多到少配对（并列按旧 cid、新簇 key 确定顺序）；
+ *   3. 未匹配上的新簇分配全新 cid（旧最大序号之后递增，永不复用已消失簇号）；
+ * 复用成功的簇带 addedMemberKeys / removedMemberKeys（成员增删差异）；
+ * 已消失的旧簇列入 removed（UI 可提示“已消失”，不参与新结果）。
+ * @returns {{clusters, removed}}
+ */
+function reconcileAuditClusters(prevClusters, nextClusters) {
+  const prev = Array.isArray(prevClusters) ? prevClusters.filter((c) => c && c.key) : [];
+  const next = Array.isArray(nextClusters) ? nextClusters.filter((c) => c && c.key) : [];
+  const cidNum = (cid) => {
+    const m = /^c(\d+)$/.exec(String(cid || ''));
+    return m ? Number(m[1]) : 0;
+  };
+  let maxCid = prev.reduce((n, c) => Math.max(n, cidNum(c.cid)), 0);
+
+  const memberKeySet = (c) => new Set((c.members || []).map((m) => m.key));
+  const result = new Map();   // next cluster object -> { cid, added, removed }
+  const usedPrev = new Set();
+
+  // 第一轮：成员集合完全一致（簇 key 相等）—— 无增删，直接复用
+  for (const nc of next) {
+    const exact = prev.find((pc) => !usedPrev.has(pc) && pc.key === nc.key);
+    if (exact) {
+      usedPrev.add(exact);
+      result.set(nc, { cid: exact.cid, added: [], removed: [] });
+    }
+  }
+  // 第二轮：按共享成员数贪心配对（只在有交集时）
+  const pairs = [];
+  for (const nc of next) {
+    if (result.has(nc)) continue;
+    const nset = memberKeySet(nc);
+    for (const pc of prev) {
+      if (usedPrev.has(pc)) continue;
+      let overlap = 0;
+      for (const m of pc.members || []) if (nset.has(m.key)) overlap++;
+      if (overlap > 0) pairs.push({ nc, pc, overlap });
+    }
+  }
+  pairs.sort((a, b) => (b.overlap - a.overlap)
+    || (cidNum(a.pc.cid) - cidNum(b.pc.cid))
+    || (a.nc.key < b.nc.key ? -1 : a.nc.key > b.nc.key ? 1 : 0));
+  for (const { nc, pc } of pairs) {
+    if (result.has(nc) || usedPrev.has(pc)) continue;
+    usedPrev.add(pc);
+    const oldKeys = new Set((pc.members || []).map((m) => m.key));
+    const newKeys = memberKeySet(nc);
+    result.set(nc, {
+      cid: pc.cid,
+      added: [...newKeys].filter((k) => !oldKeys.has(k)).sort(),
+      removed: [...oldKeys].filter((k) => !newKeys.has(k)).sort()
+    });
+  }
+  // 未匹配新簇：分配全新 cid（保持新簇既定排序）
+  for (const nc of next) {
+    if (result.has(nc)) continue;
+    maxCid += 1;
+    result.set(nc, {
+      cid: `c${maxCid}`,
+      added: (nc.members || []).map((m) => m.key).sort(),
+      removed: []
+    });
+  }
+
+  const clusters = next.map((nc) => {
+    const match = result.get(nc);
+    return {
+      ...nc,
+      cid: match.cid,
+      addedMemberKeys: match.added,
+      removedMemberKeys: match.removed
+    };
+  });
+  const removed = prev.filter((pc) => !usedPrev.has(pc)).map((pc) => ({
+    cid: pc.cid, key: pc.key, rule: pc.rule, title: pc.title,
+    severity: pc.severity, cells: [...(pc.cells || [])],
+    memberKeys: (pc.members || []).map((m) => m.key).sort()
+  })).sort((a, b) => cidNum(a.cid) - cidNum(b.cid));
+  return { clusters, removed };
 }
 
 /**
@@ -1880,7 +2175,7 @@ const api = {
   duplexEligibility, buildDuplexPlates,
   creepEligibility, creepCompensation, normalizeCreepScheme,
   findFoldPath, candidateSteps, stateKey, describeStep,
-  trackPanel, auditPlan,
+  trackPanel, auditPlan, buildAuditClusters, reconcileAuditClusters,
   normalizePlanMeta, coercePlanMeta, MetaError, META_LIMITS,
   normalizeAnnotations, coerceAnnotations, annotationStats, locateAnnotations,
   AnnotationError, ANNO_LIMITS, ANNO_SEVERITIES, newAnnotationId,

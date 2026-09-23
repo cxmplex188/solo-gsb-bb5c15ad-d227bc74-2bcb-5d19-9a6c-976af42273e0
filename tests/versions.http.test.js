@@ -228,6 +228,34 @@ test('旧档（无 version 字段、无版本目录）首次保存：补存 v1 �
   assert.equal(list.json.items[1].name, '旧档更新');
 });
 
+test('GET 版本快照审计簇摘要：只读派生、随快照确定，不改写快照', async () => {
+  // v1 为空白 1×2 单竖折：4 空白槽 + 2 未覆盖格（仅警告），簇视图可复现
+  const r = await get('/api/plans/ver-demo/versions/1/audit-clusters');
+  assert.equal(r.status, 200);
+  assert.equal(r.json.ok, true);
+  assert.equal(r.json.auditOk, true);
+  assert.equal(r.json.verdict, 'pass');
+  assert.equal(r.json.version, 1);
+  assert.ok(r.json.snapshotSavedAt);
+  const cs = r.json.clusterSummary;
+  assert.ok(cs.clusters > 0 && cs.errors === 0 && cs.warnings > 0);
+  assert.equal(cs.clusters, r.json.clusters.length);
+  // 同一快照重复请求：簇 key/cid 完全一致（随版本快照确定性保存）
+  const r2 = await get('/api/plans/ver-demo/versions/1/audit-clusters');
+  assert.deepEqual(r2.json.clusters.map((c) => c.key), r.json.clusters.map((c) => c.key));
+  assert.deepEqual(r2.json.clusters.map((c) => c.cid), r.json.clusters.map((c) => c.cid));
+  // 未覆盖格各自独立成簇，成员保留说明
+  const unc = r.json.clusters.filter((c) => c.rule === 'uncovered_cell');
+  assert.equal(unc.length, 2);
+  assert.ok(unc.every((c) => c.members[0].note && c.members[0].severity === 'warning'));
+  // 只读：快照文件未被追加聚类字段
+  const snap = (await get('/api/plans/ver-demo/versions/1')).json.snapshot;
+  assert.equal(snap.clusters, undefined);
+  // 不存在版本 / 存档
+  assert.equal((await get('/api/plans/ver-demo/versions/99/audit-clusters')).status, 404);
+  assert.equal((await get('/api/plans/nope/versions/1/audit-clusters')).status, 404);
+});
+
 test('DELETE 删除存档连带删除版本历史', async () => {
   const r = await del('/api/plans/ver-demo');
   assert.equal(r.json.ok, true);

@@ -571,6 +571,77 @@ button.fold { flex: 1 1 40%; min-width: 110px; font-weight: 600; }
   font-variant-numeric: tabular-nums;
 }
 
+/* 问题聚类视图（只读派生视图） */
+.audit-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.audit-view-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.audit-view-btn {
+  border: none;
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+.audit-view-btn + .audit-view-btn { border-left: 1px solid var(--line); }
+.audit-view-btn.active { background: var(--primary); color: #fff; }
+.audit-sev-filter {
+  font-size: 12px;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.audit-sev-filter select { font-size: 12px; padding: 2px 4px; }
+.audit-cluster-hint { margin-top: 6px; }
+.audit-cluster { cursor: pointer; transition: box-shadow .12s ease; }
+.audit-cluster:hover { box-shadow: 0 0 0 2px rgba(225, 29, 98, .18); }
+.audit-cluster.selected {
+  border-color: #e11d62;
+  box-shadow: 0 0 0 2px rgba(225, 29, 98, .28);
+}
+.audit-cluster:focus-visible { outline: 2px solid #e11d62; outline-offset: 1px; }
+.audit-cluster .cluster-cid {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 700;
+  color: #e11d62;
+  background: #fde7f0;
+  border-radius: 8px;
+  padding: 0 7px;
+  font-variant-numeric: tabular-nums;
+}
+.audit-cluster .cluster-count { font-size: 11px; color: var(--muted); }
+.audit-cluster .cluster-badge {
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 8px;
+  padding: 0 7px;
+  font-variant-numeric: tabular-nums;
+}
+.audit-cluster .cluster-badge.added { background: #e3f6ec; color: var(--ok); }
+.audit-cluster .cluster-badge.removed { background: var(--warn-bg); color: var(--danger); }
+.cluster-slots {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.cluster-delta { margin-top: 3px; font-size: 11px; font-weight: 600; }
+.cluster-delta.added { color: var(--ok); }
+.cluster-delta.removed { color: var(--danger); }
+.cluster-notes { margin-top: 3px; }
+.cluster-notes-more { font-size: 11px; }
+.cluster-notes-more summary { cursor: pointer; color: var(--primary); }
+
 @media (max-width: 1100px) {
   .layout { grid-template-columns: 1fr; }
 }

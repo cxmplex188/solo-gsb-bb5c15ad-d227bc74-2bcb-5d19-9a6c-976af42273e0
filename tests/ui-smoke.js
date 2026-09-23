@@ -27,7 +27,7 @@ function makeEl(id) {
     querySelectorAll() { return []; },
     removeAttribute() {}, setAttribute() {},
     options: [],
-    classList: { add() {}, remove() {}, contains() { return false; } },
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
     getContext: () => ({
       setTransform() {}, clearRect() {}, save() {}, restore() {},
       beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, fill() {},
@@ -69,6 +69,8 @@ const ids = ['rowsInput', 'colsInput', 'createGridBtn', 'axisSelect', 'lineSelec
   'duplexCloseBtn', 'plateFrontMeta', 'plateBackMeta', 'plateFrontSheet',
   'plateBackSheet',
   'auditCard', 'auditVerdict', 'auditStatus', 'auditFindings', 'auditExportBtn',
+  'auditToolbar', 'auditViewFindings', 'auditViewClusters', 'auditSevFilter',
+  'auditSevFilterWrap', 'auditClusters', 'auditClusterHint',
   'creepCard', 'creepThickness', 'creepBleed', 'creepApplyBtn', 'creepClearBtn',
   'creepStatus', 'creepSummary', 'creepApplied', 'creepTableWrap', 'creepRows',
   'annotationCard', 'annoOpenOnly', 'annoSeverityFilter', 'annoFaceFilter',
@@ -549,6 +551,54 @@ assert.ok(auditIds.has('uncovered_cell'));
 assert.ok(auditIds.has('inverted_page'));
 assert.ok(/需修订/.test(els.auditVerdict.textContent));
 assert.ok(/错误/.test(els.auditStatus.textContent));
+
+// 问题聚类视图：确定性并查集簇 + 严重级别筛选 + 点簇画布联动（只读，不改原始结论）
+assert.equal(els.auditToolbar.hidden, false);
+assert.ok(ui.audit.clusters.length > 0);
+assert.equal(ui.audit.clusters.length, ui.audit.result.clusters.length);
+assert.equal(ui.audit.clusters.reduce((n, c) => n + c.memberCount, 0),
+  ui.audit.result.clusterSummary.members);
+const findingsSnapshot = JSON.stringify(ui.audit.result.findings);
+els.auditViewClusters.dispatch('click');
+assert.equal(ui.audit.view, 'clusters');
+assert.equal(els.auditClusters.hidden, false);
+assert.equal(els.auditFindings.hidden, true);
+assert.equal(els.auditSevFilterWrap.hidden, false);
+assert.ok(/问题簇/.test(els.auditClusterHint.textContent));
+// 倒置槽 1/2/7/8 合并为一个 error 簇，受影响原格 0,0 与 1,0
+const invClusters = ui.audit.clusters.filter((c) => c.rule === 'inverted_page');
+assert.equal(invClusters.length, 1);
+assert.equal(invClusters[0].memberCount, 4);
+assert.deepEqual(invClusters[0].cells, ['0,0', '1,0']);
+// 严重级别筛选：仅错误时警告簇不渲染
+els.auditSevFilter.value = 'error';
+els.auditSevFilter.dispatch('change');
+const shownErrorClusters = ui.audit.clusters.filter((c) => c.severity === 'error');
+const collectText = (el) => (el.textContent || '')
+  + (el.__children || []).map(collectText).join('');
+const clusterViewText = collectText(els.auditClusters);
+assert.ok(clusterViewText.includes(shownErrorClusters[0].cid));
+assert.ok(!clusterViewText.includes('未覆盖纸格'));
+els.auditSevFilter.value = 'all';
+els.auditSevFilter.dispatch('change');
+// 点簇联动：记录选中 cid，画布映射给出受影响原格
+ui.selectAuditCluster(invClusters[0].cid);
+assert.equal(ui.audit.selectedCid, invClusters[0].cid);
+const state = FE.replay(ui.plan.rows, ui.plan.cols, ui.plan.labels, ui.plan.steps).state;
+const cmap = ui.currentAuditClusterMap(state);
+assert.ok(cmap.size >= 1);
+const origins = new Set();
+for (const s of cmap.values()) for (const o of s) origins.add(o);
+assert.deepEqual([...origins].sort(), ['0,0', '1,0']);
+// 再点取消
+ui.selectAuditCluster(null);
+assert.equal(ui.audit.selectedCid, null);
+assert.equal(ui.currentAuditClusterMap(state).size, 0);
+// 回到条目视图；聚类只读：findings 未被改动
+els.auditViewFindings.dispatch('click');
+assert.equal(els.auditFindings.hidden, false);
+assert.equal(els.auditClusters.hidden, true);
+assert.equal(JSON.stringify(ui.audit.result.findings), findingsSnapshot);
 
 // 非法步骤：审计中止，仅报告首个错误，不展示后续结论
 els.rowsInput.value = '1'; els.colsInput.value = '3';

@@ -447,6 +447,40 @@ test('POST /api/audit：非法折叠仅报告首个错误，不伪造后续结�
   assert.equal(r.json.error.stepIndex, 1);
   assert.deepEqual(r.json.error.conflicts, ['2,0', '1,0']);
   assert.ok(!('findings' in r.json), '不得附带后续检查结论');
+  assert.ok(!('clusters' in r.json), '审计中止时不产出聚类视图');
+});
+
+test('POST /api/audit：只读返回问题簇摘要，倒置相邻槽合并为一簇', async () => {
+  const r = await post('/api/audit', { rows: 2, cols: 2, labels: {}, steps: STEPS });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.ok, true);
+  assert.ok(Array.isArray(r.json.clusters));
+  assert.deepEqual(Object.keys(r.json.clusterSummary).sort(),
+    ['clusters', 'errors', 'infos', 'members', 'warnings']);
+  const cs = r.json.clusterSummary;
+  assert.equal(cs.clusters, r.json.clusters.length);
+  assert.equal(cs.members, r.json.clusters.reduce((n, c) => n + c.memberCount, 0));
+  // 倒置槽 1/2/7/8 经相邻+共享原格并为一簇（error），受影响纸格 0,0 与 1,0
+  const inv = r.json.clusters.filter((c) => c.rule === 'inverted_page');
+  assert.equal(inv.length, 1);
+  assert.equal(inv[0].severity, 'error');
+  assert.equal(inv[0].memberCount, 4);
+  assert.deepEqual(inv[0].slots.map((s) => s.slot), [1, 2, 7, 8]);
+  assert.deepEqual(inv[0].cells, ['0,0', '1,0']);
+  assert.ok(inv[0].members.every((m) => m.note && m.severity === 'error' && m.slots.length === 1));
+  // 簇含稳定身份字段，且 cid 规范编号
+  assert.ok(/^h[0-9a-f]{8}$/.test(inv[0].key.split('|')[1]));
+  r.json.clusters.forEach((c, i) => assert.equal(c.cid, `c${i + 1}`));
+});
+
+test('POST /api/audit：聚类结果确定性（同请求两次，簇 key/cid 一致）', async () => {
+  const body = { rows: 2, cols: 2, labels: {}, steps: STEPS };
+  const a = (await post('/api/audit', body)).json;
+  const b = (await post('/api/audit', body)).json;
+  assert.deepEqual(a.clusters.map((c) => c.key), b.clusters.map((c) => c.key));
+  assert.deepEqual(a.clusters.map((c) => c.cid), b.clusters.map((c) => c.cid));
+  // 只读视图不改变原始审计结论
+  assert.deepEqual(a.findings, b.findings);
 });
 
 test('POST /api/audit：方案非法返回 400 bad_plan', async () => {

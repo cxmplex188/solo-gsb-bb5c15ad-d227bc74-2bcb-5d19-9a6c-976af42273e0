@@ -178,6 +178,10 @@ app.post('/api/trajectory', (req, res) => {
 });
 
 // ---------- 生产质量审计（只读） ----------
+// 响应在原始 findings/verdict 之外附带只读问题聚类视图：
+// clusters（同规则相邻槽位/共享原格的确定性并查集簇，含成员严重级别/槽位/说明、
+// 稳定 key、规范 cid）与 clusterSummary（按簇严重级别计数）。聚类完全由方案派生、
+// 不改动原始审计结论；方案本身不变时结果确定，随方案版本快照保存后可对快照复现。
 app.post('/api/audit', (req, res) => {
   try {
     const plan = E.normalizePlan(req.body || {});
@@ -589,6 +593,42 @@ app.get('/api/plans/:id/versions/:version', (req, res) => {
   const result = readVersionSnapshot(req.params.id, req.params.version);
   if (result.error) return res.status(result.status).json({ ok: false, error: result.error });
   res.json({ ok: true, snapshot: result.snapshot });
+});
+
+/**
+ * GET /api/plans/:id/versions/:version/audit-clusters：
+ * 对指定“不可变版本快照”只读重放生产质量审计，返回其问题聚类视图摘要。
+ * 聚类是方案的确定性派生视图：同一快照任意时刻重算结果一致，等价于随快照保存，
+ * 且快照文件本身不被改写、原始审计结论（findings/verdict）也不被修改。
+ */
+app.get('/api/plans/:id/versions/:version/audit-clusters', (req, res) => {
+  const result = readVersionSnapshot(req.params.id, req.params.version);
+  if (result.error) return res.status(result.status).json({ ok: false, error: result.error });
+  const snap = result.snapshot;
+  let audit;
+  try {
+    audit = E.auditPlan(snap.rows, snap.cols, snap.labels, snap.steps);
+  } catch (e) {
+    return res.status(400).json({ ok: false, error: { code: 'bad_plan', message: e.message } });
+  }
+  if (!audit.ok) {
+    return res.json({
+      ok: true, id: req.params.id, version: Number(req.params.version),
+      snapshotSavedAt: typeof snap.savedAt === 'string' ? snap.savedAt : null,
+      auditOk: false,
+      blocked: { code: audit.code, stepIndex: audit.stepIndex, message: audit.message }
+    });
+  }
+  res.json({
+    ok: true,
+    id: req.params.id,
+    version: Number(req.params.version),
+    snapshotSavedAt: typeof snap.savedAt === 'string' ? snap.savedAt : null,
+    auditOk: true,
+    verdict: audit.verdict,
+    clusterSummary: audit.clusterSummary,
+    clusters: audit.clusters
+  });
 });
 
 /**
