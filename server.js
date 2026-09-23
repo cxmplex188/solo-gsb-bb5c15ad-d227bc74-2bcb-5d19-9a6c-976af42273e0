@@ -178,6 +178,17 @@ app.post('/api/trajectory', (req, res) => {
 });
 
 // ---------- 生产质量审计（只读） ----------
+/**
+ * 审计完成时附加“问题聚类”只读视图：同规则结果按（相邻阅读槽位 / 共享原始
+ * 纸格）确定性并查集合并为簇。编号 C1.. 在本次响应内稳定（按严重级别排序）。
+ * 审计中止时不输出 clusters（不在未知状态上伪造派生结论）。
+ */
+function withClusters(result) {
+  if (!result || !result.ok) return result;
+  const clusters = E.assignAuditClusterIds(E.buildAuditClusters(result));
+  return { ...result, clusters, clusterSummary: E.auditClusterSummary(clusters) };
+}
+
 app.post('/api/audit', (req, res) => {
   try {
     const plan = E.normalizePlan(req.body || {});
@@ -193,7 +204,7 @@ app.post('/api/audit', (req, res) => {
         }
       });
     }
-    res.json(result);
+    res.json(withClusters(result));
   } catch (e) {
     res.status(400).json({ ok: false, error: { code: 'bad_plan', message: e.message } });
   }
@@ -290,6 +301,9 @@ function versionSummary(id, f) {
       note: typeof p.note === 'string' ? p.note : '',
       annotations: annos.length,
       openAnnotations: annos.reduce((n, a) => n + (a && a.resolved !== true ? 1 : 0), 0),
+      auditClusters: Array.isArray(p.auditClusters) ? p.auditClusters.length : 0,
+      auditErrorClusters: Array.isArray(p.auditClusters)
+        ? p.auditClusters.reduce((n, c) => n + (c && c.severity === 'error' ? 1 : 0), 0) : 0,
       restoredFrom: p.restoredFrom || null
     };
   } catch { return null; }
@@ -516,6 +530,20 @@ app.post('/api/plans', (req, res) => {
   };
   // 爬移补偿独立方案字段：存在则随存档保留（GET /api/plans/:id 原样返回）
   if (plan.creepCompensation) body.creepCompensation = plan.creepCompensation;
+
+  // 审计问题聚类为只读派生数据：保存时由服务端重算并随版本快照落盘，
+  // 客户端提交中的同名字段一律忽略，无法借此篡改审计结论或簇身份。
+  // 编号沿用上一 head（旧簇按稳定成员 key 复用，成员变化记 added/removed）。
+  const audit = E.auditPlan(plan.rows, plan.cols, plan.labels, plan.steps);
+  if (audit.ok && Array.isArray(oldHead && oldHead.auditClusters)) {
+    body.auditClusters = E.reconcileAuditClusters(
+      E.buildAuditClusters(audit), oldHead.auditClusters);
+  } else if (audit.ok) {
+    body.auditClusters = E.assignAuditClusterIds(E.buildAuditClusters(audit));
+  } else {
+    // 审计中止（非法步骤）：不伪造簇；历史快照仍保留其保存当时的簇
+    body.auditClusters = null;
+  }
 
   // 旧 head 此前未入历史（首次升级到版本功能）时先补存为 v1，
   // 新方案从 v1 开始；版本号一旦落盘不可变。

@@ -23,7 +23,14 @@ const app = {
   pathfind: { result: null, sig: null, gridKey: null },      // 折手自动寻路状态
   track: { result: null, gridKey: null, target: null },  // 面片轨迹
   duplex: { eligible: null, open: false, flip: 'long', result: null, sig: null },  // 双面印刷版
-  audit: { result: null },                  // 生产质量审计（只读，随方案变化自动重算）
+  audit: {
+    result: null,                // 生产质量审计（只读，随方案变化自动重算）
+    clusters: [],                // 问题簇（只读派生，按成员 key 稳定复用编号）
+    selectedClusterId: null,     // 点选联动画布高亮的簇 id
+    severityFilter: 'all',       // 簇列表严重级别筛选
+    view: 'findings',            // findings=逐条问题 / clusters=问题簇
+    nextClusterId: 1             // 客户端簇编号游标（仅在服务端谱系之外的新簇使用）
+  },  // 生产质量审计（只读，随方案变化自动重算）
   creep: { eligible: null, result: null },  // 书帖爬移补偿（实时重算，应用后写入独立字段）
   annotation: { editing: null, selectedId: null },  // 校样批注弹层 / 画布定位高亮
   listFilter: { tags: '', q: '', since: '' },  // 存档列表当前筛选条件
@@ -133,6 +140,12 @@ function init() {
   });
 
   $('auditExportBtn').addEventListener('click', exportAudit);
+  $('auditViewFindings').addEventListener('click', () => setAuditView('findings'));
+  $('auditViewClusters').addEventListener('click', () => setAuditView('clusters'));
+  $('auditClusterSeverity').addEventListener('change', (e) => {
+    app.audit.severityFilter = e.target.value;
+    renderAuditClusters();
+  });
 
   $('creepThickness').addEventListener('input', renderCreep);
   $('creepBleed').addEventListener('input', renderCreep);
@@ -458,12 +471,14 @@ function draw() {
     const track = currentTrackInfo(state);
     const annoMap = currentAnnotationMarks(state);
     const diffMap = currentDiffCellMap(state);
+    const auditMap = currentAuditClusterMap(state);
     for (const [cellKey, ids] of Object.entries(state.stacks)) {
       const [cx, cy] = cellKey.split(',').map(Number);
       drawStack(cx, cy, ids, state, conflicts.has(cellKey), movingCells.has(cellKey),
         track && track.cell === cellKey ? track : null,
         annoMap.get(cellKey) || null,
-        diffMap.get(cellKey) || null);
+        diffMap.get(cellKey) || null,
+        auditMap.get(cellKey) || null);
     }
   }
 
@@ -557,7 +572,7 @@ function line(x1, y1, x2, y2) {
   ctx.stroke();
 }
 
-function drawStack(cx, cy, ids, state, conflict, moving, track, anno, diff) {
+function drawStack(cx, cy, ids, state, conflict, moving, track, anno, diff, audit) {
   const { x, y } = originXY(cx, cy);
   const depth = ids.length;
   const trackLayer = track ? track.layer : 0;   // 1 = 最上层
@@ -628,6 +643,30 @@ function drawStack(cx, cy, ids, state, conflict, moving, track, anno, diff) {
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
         ctx.fillText(selected ? '◆差' : '差', x + 4, y + 13);
+        ctx.textBaseline = 'alphabetic';
+      }
+    }
+  }
+
+  // 审计问题簇高亮：点簇后该簇全部受影响原始纸格用红色虚线圈出（按层序偏移）
+  if (audit) {
+    for (const origin of audit.origins) {
+      const layer = ids.indexOf(origin) + 1;
+      if (layer <= 0) continue;
+      const li = layer - 1;
+      ctx.save();
+      ctx.setLineDash([4, 3]);
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = '#d64545';
+      roundRect(x + li * 2.5 - 3, y - li * 2.5 - 3, CELL - 2, CELL - 2, 8);
+      ctx.stroke();
+      ctx.restore();
+      if (layer === 1) {
+        ctx.font = 'bold 10px system-ui, sans-serif';
+        ctx.fillStyle = '#d64545';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('簇', x + CELL - 12, y + 13);
         ctx.textBaseline = 'alphabetic';
       }
     }
@@ -2101,15 +2140,21 @@ function renderAudit() {
   const verdictEl = $('auditVerdict');
   const status = $('auditStatus');
   const list = $('auditFindings');
+  const clusterList = $('auditClusters');
+  const toolbar = $('auditToolbar');
   const exportBtn = $('auditExportBtn');
   if (!app.plan.rows) {
     app.audit.result = null;
+    resetAuditClusters();
     verdictEl.className = 'audit-verdict idle';
     verdictEl.textContent = '未审计';
     status.className = 'hint';
     status.textContent = '先在左侧创建行列纸格。';
     list.hidden = true;
     list.innerHTML = '';
+    clusterList.hidden = true;
+    clusterList.innerHTML = '';
+    toolbar.hidden = true;
     exportBtn.disabled = true;
     return;
   }
@@ -2126,20 +2171,50 @@ function renderAudit() {
       '仅报告首个错误，不伪造后续检查结论；修正非法步骤后自动重新审计。';
     list.hidden = true;
     list.innerHTML = '';
+    resetAuditClusters();
+    clusterList.hidden = true;
+    clusterList.innerHTML = '';
+    toolbar.hidden = true;
+    draw();
     return;
   }
+
+  // 只读派生视图：问题簇按稳定成员 key 重算并复用既有簇编号；
+  // 正在只读查看历史快照时以快照内随版本保存的簇为谱系（历史身份不重排），
+  // 否则沿用上一次重算的簇（草稿编辑过程中编号稳定）。
+  const snapshotSeed = isReviewing() && app.review.view && app.review.view.snapshot
+    ? (Array.isArray(app.review.view.snapshot.auditClusters)
+      ? app.review.view.snapshot.auditClusters : null)
+    : null;
+  recomputeAuditClusters(snapshotSeed);
 
   const s = result.summary;
   verdictEl.className = 'audit-verdict ' + (result.verdict === 'pass' ? 'pass' : 'fail');
   verdictEl.textContent = result.verdict === 'pass' ? '✓ 可发布' : '✗ 需修订';
   status.className = 'hint ' + (result.verdict === 'pass' ? 'audit-status-ok' : 'audit-status-err');
+  const cs = app.audit.clusters;
+  const clusterText = cs.length
+    ? `聚类为 ${cs.length} 个问题簇（${cs.filter((c) => c.severity === 'error').length} 错误簇 / ` +
+      `${cs.filter((c) => c.severity === 'warning').length} 警告簇，点簇可在画布联动高亮）。`
+    : '未形成问题簇。';
   status.textContent =
     `完整重放 ${result.stats.steps} 步：错误 ${s.errors} 条、警告 ${s.warnings} 条` +
     `（容量 ${result.stats.capacity} 面，已标注 ${result.stats.labeledFaces} 面）。` +
-    (result.verdict === 'pass' ? ' 结论：可发布。' : ' 结论：需修订后再交付。');
+    (result.verdict === 'pass' ? ' 结论：可发布。' : ' 结论：需修订后再交付。') + ' ' + clusterText;
 
+  toolbar.hidden = false;
+  renderAuditFindingsList();
+  renderAuditClusters();
+  draw();
+}
+
+/** 逐条问题列表（既有视图，内容仍直接来自只读审计结果）。 */
+function renderAuditFindingsList() {
+  const result = app.audit.result;
+  const list = $('auditFindings');
   list.innerHTML = '';
-  list.hidden = false;
+  list.hidden = app.audit.view !== 'findings';
+  if (!result || !result.ok) { list.hidden = true; return; }
   if (!result.findings.length) {
     const li = document.createElement('li');
     li.className = 'audit-item info';
@@ -2183,6 +2258,163 @@ function renderAudit() {
   }
 }
 
+/**
+ * 重算簇并按成员 key 复用编号：客户端始终用本地产出的成员内容，
+ * prev 只提供 id 与可能已消失成员的说明（快照数据仅用于身份复用，不展示）。
+ * @param forcedSeed 非空时强制作为复用基线（查看历史快照 / 新载入方案）；
+ *                   不传则沿用上一次重算的簇，保证草稿连续编辑时编号稳定。
+ */
+function recomputeAuditClusters(forcedSeed) {
+  const result = app.audit.result;
+  if (!result || !result.ok) { resetAuditClusters(); return; }
+  const fresh = E.buildAuditClusters(result);
+  const prev = forcedSeed || app.audit.clusters;
+  app.audit.clusters = E.reconcileAuditClusters(fresh, prev, app.audit.nextClusterId || 1);
+  if (app.audit.clusters.length) {
+    app.audit.nextClusterId = Math.max(
+      ...app.audit.clusters.map((c) => Number(String(c.id).slice(1)) || 0)) + 1;
+  }
+  if (app.audit.selectedClusterId &&
+      !app.audit.clusters.some((c) => c.id === app.audit.selectedClusterId)) {
+    app.audit.selectedClusterId = null;
+  }
+}
+
+function resetAuditClusters() {
+  app.audit.clusters = [];
+  app.audit.selectedClusterId = null;
+}
+
+function setAuditView(view) {
+  app.audit.view = view;
+  $('auditViewFindings').classList.toggle('active', view === 'findings');
+  $('auditViewClusters').classList.toggle('active', view === 'clusters');
+  if (app.audit.result && app.audit.result.ok) {
+    renderAuditFindingsList();
+    renderAuditClusters();
+  }
+}
+
+function clusterPassesFilter(c) {
+  switch (app.audit.severityFilter) {
+    case 'error': return c.severity === 'error';
+    case 'warning': return c.severity === 'warning';
+    case 'error-warning': return c.severity === 'error' || c.severity === 'warning';
+    default: return true;
+  }
+}
+
+/** 渲染问题簇视图：严重级别筛选 + 成员（含本次重算新增/移除）+ 点选联动。 */
+function renderAuditClusters() {
+  const clusterList = $('auditClusters');
+  clusterList.innerHTML = '';
+  const show = app.audit.view === 'clusters' && app.audit.result && app.audit.result.ok;
+  clusterList.hidden = !show;
+  $('auditClusterSeverity').value = app.audit.severityFilter;
+  if (!show) return;
+  const clusters = app.audit.clusters.filter(clusterPassesFilter);
+  if (!app.audit.clusters.length) {
+    const li = document.createElement('li');
+    li.className = 'audit-item info';
+    li.innerHTML = '<span class="audit-msg">当前审计没有问题，因此没有问题簇。</span>';
+    clusterList.appendChild(li);
+    return;
+  }
+  if (!clusters.length) {
+    const li = document.createElement('li');
+    li.className = 'audit-item info';
+    li.innerHTML = '<span class="audit-msg">当前严重级别筛选下没有问题簇。</span>';
+    clusterList.appendChild(li);
+    return;
+  }
+  const sevName = { error: '错误簇', warning: '警告簇', info: '提示簇' };
+  const slotText = (m) => {
+    if (!m.slots || !m.slots.length) return m.cell ? `原格(${m.cell})` : '全局';
+    return `槽位 ${m.slots.join('、')}` + (m.stack != null ? `（叠层 ${m.stack}）` : '')
+      + (m.cell ? ` · 原格(${m.cell})` : '');
+  };
+  for (const c of clusters) {
+    const li = document.createElement('li');
+    li.className = `cluster-item ${c.severity}` +
+      (app.audit.selectedClusterId === c.id ? ' selected' : '');
+    li.dataset.clusterId = c.id;
+
+    const head = document.createElement('div');
+    head.className = 'cluster-head';
+    head.innerHTML = `<span class="cluster-id">${escapeHtml(c.id)}</span>` +
+      `<span class="sev ${c.severity}">${sevName[c.severity] || c.severity}</span>` +
+      `<span class="cluster-title">${escapeHtml(c.title)}</span>` +
+      `<span class="cluster-count">${c.memberCount} 个成员 · ${c.cells.length} 个原格</span>`;
+    li.appendChild(head);
+
+    const meta = document.createElement('div');
+    meta.className = 'cluster-meta';
+    const parts = [];
+    if (c.slots.length) parts.push(`阅读槽位：${c.slots.join('、')}`);
+    if (c.cells.length) parts.push(`受影响原格：${c.cells.join('、')}`);
+    if (c.stacks.length > 1) parts.push(`跨叠层：${c.stacks.join('、')}`);
+    meta.textContent = parts.join('　');
+    li.appendChild(meta);
+
+    const ul = document.createElement('ul');
+    ul.className = 'cluster-members';
+    const addMember = (m, cls) => {
+      const mi = document.createElement('li');
+      if (cls) mi.className = cls;
+      mi.textContent = `${slotText(m)} — ${m.message || c.title}`;
+      ul.appendChild(mi);
+    };
+    for (const m of c.members) {
+      addMember(m, c.added.some((a) => a.key === m.key) ? 'member-add' : '');
+    }
+    for (const m of c.removed) addMember(m, 'member-remove');
+    li.appendChild(ul);
+
+    if (c.added.length || c.removed.length) {
+      const hint = document.createElement('div');
+      hint.className = 'cluster-change-hint';
+      hint.textContent = `相对上次重算：新增 ${c.added.length}、移除 ${c.removed.length} 个成员` +
+        '（簇编号按稳定成员身份复用，未误合并）。';
+      li.appendChild(hint);
+    }
+
+    li.addEventListener('click', () => selectAuditCluster(c.id));
+    clusterList.appendChild(li);
+  }
+}
+
+/** 点簇：画布联动高亮簇内全部受影响原始纸格（再次点击同簇取消）。 */
+function selectAuditCluster(id) {
+  app.audit.selectedClusterId = app.audit.selectedClusterId === id ? null : id;
+  renderAuditClusters();
+  draw();
+}
+
+/** 当前选中簇引用（供画布高亮）。 */
+function selectedAuditCluster() {
+  const id = app.audit.selectedClusterId;
+  return id ? app.audit.clusters.find((c) => c.id === id) || null : null;
+}
+
+/**
+ * 审计簇画布定位：把簇内受影响原始纸格按身份映射到当前回放状态，
+ * 返回 Map<当前格位key, { origins:Set<原始纸格> }>，与差异高亮机制一致。
+ */
+function currentAuditClusterMap(state) {
+  const map = new Map();
+  const c = selectedAuditCluster();
+  if (!c || !state || !c.cells.length) return map;
+  for (const origin of c.cells) {
+    const p = state.panels[origin];
+    if (!p) continue;
+    const at = p.cx + ',' + p.cy;
+    if (!state.stacks[at]) continue;
+    if (!map.has(at)) map.set(at, { origins: new Set() });
+    map.get(at).origins.add(origin);
+  }
+  return map;
+}
+
 /** 导出审计报告 JSON（方案 + 审计结果，只读不改动方案）。 */
 function exportAudit() {
   const result = app.audit.result;
@@ -2193,7 +2425,8 @@ function exportAudit() {
     plan: planPayload(),
     annotations: planPayload().annotations,
     annotationSummary: E.annotationStats(planPayload().annotations),
-    audit: result
+    audit: result,
+    auditClusters: app.audit.clusters
   };
   const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
@@ -2311,6 +2544,9 @@ function applyPlan(plan, id) {
   app.loadedId = id || null;
   app.annotation.editing = null;
   app.annotation.selectedId = null;
+  app.audit.clusters = [];              // 新载入方案：簇谱系从全新编号开始
+  app.audit.selectedClusterId = null;
+  app.audit.nextClusterId = 1;
   $('annoOpenOnly').checked = false;
   $('annoSeverityFilter').value = '';
   $('annoFaceFilter').value = '';
@@ -2370,6 +2606,12 @@ async function savePlan() {
     app.restoredFrom = null;   // 已作为新版本落盘，恢复来源仅记录在该版本元信息上
     app.plan.tags = data.plan.tags;
     if (Array.isArray(data.plan.annotations)) app.plan.annotations = data.plan.annotations;
+    // 审计簇编号以服务端落盘快照为准（下次重算沿该谱系复用）
+    if (Array.isArray(data.plan.auditClusters)) {
+      app.audit.clusters = data.plan.auditClusters;
+      app.audit.nextClusterId = Math.max(1,
+        ...data.plan.auditClusters.map((c) => Number(String(c.id).slice(1)) || 0)) + 1;
+    }
     $('deletePlanBtn').hidden = false;
     $('reviewVersionsBtn').disabled = false;
     $('saveMsg').textContent = `已保存：${data.id}（版本 v${data.version}，${new Date().toLocaleTimeString()}）`;
@@ -2851,6 +3093,10 @@ async function enterVersionView(version) {
     $('creepBleed').value = p.creepCompensation.params.bleed;
   }
   refreshLineSelect();
+  // 切到历史快照：审计簇谱系改以快照内保存的簇为基线（见 renderAudit）
+  app.audit.clusters = [];
+  app.audit.selectedClusterId = null;
+  app.audit.nextClusterId = 1;
   app.review.view = { version, snapshot };
   const v = app.review.versions.find((x) => x.version === version) || {};
   bannerText.innerHTML =
@@ -2881,6 +3127,10 @@ function exitVersionView() {
   }
   app.review.view = null;
   app.review.draft = null;
+  // 回到草稿：放弃快照簇谱系，按当前草稿重算（强制重新编号，避免与草稿谱系串号）
+  app.audit.clusters = [];
+  app.audit.selectedClusterId = null;
+  app.audit.nextClusterId = 1;
   app.review.highlightCell = null;
   app.review.highlightCells = app.review.diff ? app.review.diff.affectedCells : [];
   $('reviewBanner').hidden = true;
@@ -2950,6 +3200,9 @@ if (typeof window !== 'undefined') {
     openDuplex, closeDuplex, renderDuplex, renderDuplexPreview,
     renderCreep, computeCreep, applyCreep, clearCreep, creepSchemeStale,
     renderAudit, exportAudit,
+    renderAuditClusters, selectAuditCluster, setAuditView,
+    selectedAuditCluster, currentAuditClusterMap,
+    recomputeAuditClusters, resetAuditClusters,
     openAnnotationEditor, closeAnnotationEditor, commitAnnotation,
     deleteEditingAnnotation, setAnnotationResolved, deleteAnnotation,
     locateAnnotation, renderAnnotations, annotationLocations, currentAnnotationMarks,

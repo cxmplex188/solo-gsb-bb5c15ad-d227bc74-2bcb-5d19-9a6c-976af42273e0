@@ -112,8 +112,21 @@ docker compose down
      卡片顶部汇总“✓ 可发布 / ✗ 需修订”结论（存在错误级结果即需修订）；
    - 方案含**非法折叠**时审计中止，仅报告首个错误（步骤号、原因与冲突纸格），
      不伪造后续检查结论；修正后自动重新审计；
-   - “导出 JSON 报告”把方案与审计结果（结论、统计、逐条结果）保存为本地 JSON；
+   - “导出 JSON 报告”把方案与审计结果（结论、统计、逐条结果、问题簇）保存为本地 JSON；
    - 网格、标注或步骤变化后审计自动重算。
+   - **问题簇视图**：卡片内可在“逐条问题 / 问题簇”之间切换。聚类把**同一审计规则**
+     在**相邻阅读槽位**（同一叠层内槽位号相差 1）或**共享原始纸格**（正/反面也算同一格）
+     的结果，用确定性并查集合并为问题簇；不同规则的结果永不混簇。每个簇保留全部成员的
+     严重级别、槽位与可读说明，簇级别取成员最高严重级别；
+   - 簇列表可按**簇严重级别**筛选（全部 / 仅错误 / 仅警告 / 错误+警告）；
+     **点击簇即在画布用红圈联动高亮该簇全部受影响原始纸格**（再点取消）；
+   - 重算（编辑后自动审计）按**稳定成员 key**（规则+页码+原格+面）复用簇编号，
+     成员变化在簇内标记**新增 / 移除**；成员完全无交集的簇绝不复用编号、不会误合并；
+   - 聚类是审计结果的**只读派生视图**：不改写任何逐条结论与可发布判定；
+     保存方案时由服务端重算并随**版本快照**保存（版本摘要含簇计数，
+     只读查看历史版本时以该快照的簇为谱系），客户端无法注入或篡改。
+   - `POST /api/audit` 返回中附带 `clusters`（含成员、受影响原格、槽位、C1.. 编号）
+     与 `clusterSummary`；审计中止（非法步骤）时不输出簇。
 8. **自动拼版**：仅当**全部折叠步骤都可合法回放且已收成单叠**时，
    右侧“自动拼版”卡片才允许输入**起始页码**与**成品页数**：
    - 系统按最终封面→封底的阅读槽位依次写入连续页码，再反向映射到
@@ -358,6 +371,7 @@ tests/duplex.test.js   双面印刷版（镜像、制版旋转、前置条件）
 tests/pathfind.test.js 折手自动寻路（BFS、状态键、无解/超限）单元测试
 tests/trajectory.test.js 面片轨迹（身份追踪、层序/朝向、非法步中断、参数校验）单元测试
 tests/audit.test.js    生产质量审计（分级结论、空白/重复/倒置/未覆盖/容量、非法步中止）单元测试
+tests/audit-clusters.test.js 审计问题聚类（并查集合并、稳定成员 key、簇编号复用/新增移除/不误合并）单元测试
 tests/creep.test.js    书帖爬移补偿（层序、书脊方向、标架换算、出血标红、字段规整）单元测试
 tests/tags.test.js     方案存档（标签规范化持久化、非法整请求 400 且不改旧档、标签交集/关键词/时间筛选、稳定排序与匹配计数、旧档兼容）HTTP 测试
 tests/versions.test.js 版本差异引擎 diffPlans（页码/步骤/批注/元信息增删改、稳定身份、受影响纸格、网格变化）单元测试
@@ -460,7 +474,15 @@ node tests/ui-smoke.js   # 前端主流程冒烟（DOM 桩，独立运行）
 `title`、`message`（含阅读序列槽位的可读说明）、`cells`（对应原始纸格）与 `step`
 （预留，当前检查均针对最终状态，为 `null`）。
 方案含非法折叠时返回 `ok:false` 与首个错误（`code` / `stepIndex` / `conflicts`），
-不附带任何后续检查结论；网格非法为 `bad_grid`，方案 JSON 非法为 `bad_plan`（HTTP 400）。
+不附带任何后续检查结论（也不输出 `clusters`）；网格非法为 `bad_grid`，
+方案 JSON 非法为 `bad_plan`（HTTP 400）。
+审计完成时另附只读问题簇视图 `clusters` 与 `clusterSummary`：每个簇含
+`id`（`C1..`，本次响应内稳定）、`ruleId`、`severity`（取成员最高级别）、
+`members`（稳定 `key` = 规则(+页码)+原格+面，含 `severity` / `slot` / `slots` /
+`stack` / `cell` / `face` / `label` / `message`）、`memberKeys`、`memberCount`、
+`cells`（受影响原始纸格）、`slots`、`stacks`；同规则成员在同叠层相邻槽位或共享原格时
+由确定性并查集合并，`clusterSummary` 给出 `clusters` / `errorClusters` /
+`warningClusters` / `infoClusters` / `members` 计数。
 该接口只读，不改动方案与存档。
 
 ### 方案存档接口（标签 / 备注 / 筛选）
@@ -547,13 +569,16 @@ node tests/ui-smoke.js   # 前端主流程冒烟（DOM 桩，独立运行）
   "items": [
     { "version": 1, "savedAt": "…", "name": "8页折帖", "rows": 1, "cols": 2,
       "steps": 1, "tags": [], "note": "",
-      "annotations": 0, "openAnnotations": 0, "restoredFrom": null }
+      "annotations": 0, "openAnnotations": 0,
+      "auditClusters": 0, "auditErrorClusters": 0, "restoredFrom": null }
   ]
 }
 ```
 
 `GET /api/plans/:id/versions/:version` 返回 `{ ok:true, snapshot }`，
-`snapshot` 即该版本完整方案 JSON（含当时的标签 / 备注 / 批注 / 爬移补偿字段）。
+`snapshot` 即该版本完整方案 JSON（含当时的标签 / 备注 / 批注 / 爬移补偿字段，
+以及服务端重算的只读审计问题簇 `auditClusters`：审计通过或仅有结论时为簇数组，
+该版本存在非法折叠时为 `null`；编号沿上一版本按稳定成员 key 复用）。
 版本号非法返回 `400 bad_version`，方案 / 版本不存在返回 `404 not_found` /
 `version_not_found`，快照损坏返回 `500 version_corrupt`。
 

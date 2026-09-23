@@ -206,7 +206,22 @@
           <button id="auditExportBtn" disabled>导出 JSON 报告</button>
         </div>
         <div id="auditStatus" class="hint"></div>
+        <div class="audit-toolbar" id="auditToolbar" hidden>
+          <div class="seg" role="tablist">
+            <button type="button" id="auditViewFindings" class="seg-btn active" role="tab">逐条问题</button>
+            <button type="button" id="auditViewClusters" class="seg-btn" role="tab">问题簇</button>
+          </div>
+          <label class="audit-filter">严重级别
+            <select id="auditClusterSeverity">
+              <option value="all">全部</option>
+              <option value="error">仅错误</option>
+              <option value="warning">仅警告</option>
+              <option value="error-warning">错误 + 警告</option>
+            </select>
+          </label>
+        </div>
         <ul id="auditFindings" class="audit-findings" hidden></ul>
+        <ul id="auditClusters" class="audit-clusters" hidden></ul>
       </section>
 
       <section class="card" id="duplexCard">

@@ -455,6 +455,111 @@ test('POST /api/audit：方案非法返回 400 bad_plan', async () => {
   assert.equal(r.json.error.code, 'bad_plan');
 });
 
+test('POST /api/audit：返回只读问题簇摘要，簇成员保留严重级别/槽位/说明', async () => {
+  const r = await post('/api/audit', { rows: 2, cols: 2, labels: {}, steps: STEPS });
+  assert.equal(r.json.ok, true);
+  assert.ok(Array.isArray(r.json.clusters));
+  assert.ok(r.json.clusters.length > 0);
+  // C1.. 顺序编号且按严重级别排序（error 簇在前）
+  assert.deepEqual(r.json.clusters.map((c) => c.id),
+    r.json.clusters.map((_, i) => `C${i + 1}`));
+  const sevRank = { error: 0, warning: 1, info: 2 };
+  for (let i = 1; i < r.json.clusters.length; i++) {
+    assert.ok(sevRank[r.json.clusters[i - 1].severity] <= sevRank[r.json.clusters[i].severity]);
+  }
+  // 簇成员结构：稳定 key、严重级别、槽位、原格、说明
+  for (const c of r.json.clusters) {
+    assert.equal(c.memberCount, c.members.length);
+    assert.deepEqual(c.memberKeys, c.members.map((m) => m.key));
+    assert.ok(c.cells.every((x) => /^\d+,\d+$/.test(x)));
+    for (const m of c.members) {
+      assert.equal(m.ruleId, c.ruleId);
+      assert.ok(['error', 'warning', 'info'].includes(m.severity));
+      assert.ok(typeof m.message === 'string' && m.message.length);
+      assert.ok(typeof m.key === 'string');
+    }
+  }
+  // 四个倒置槽位合并成单个倒置簇
+  const inv = r.json.clusters.filter((c) => c.ruleId === 'inverted_page');
+  assert.equal(inv.length, 1);
+  assert.equal(inv[0].memberCount, 4);
+  assert.deepEqual(inv[0].cells.sort(), ['0,0', '1,0']);
+  // 摘要计数一致
+  assert.equal(r.json.clusterSummary.clusters, r.json.clusters.length);
+  assert.equal(r.json.clusterSummary.members,
+    r.json.clusters.reduce((n, c) => n + c.memberCount, 0));
+  // 只读派生：原始 findings / verdict / summary 未被聚类改动
+  assert.equal(r.json.findings.length, r.json.summary.total);
+});
+
+test('POST /api/audit：全部通过时 clusters 为空数组；审计中止时不输出簇', async () => {
+  const ok = await post('/api/audit', {
+    rows: 1, cols: 2,
+    labels: { '0,0': { front: '4', back: '1' }, '1,0': { front: '2', back: '3' } },
+    steps: [{ axis: 'v', line: 1, dir: 'r' }]
+  });
+  assert.deepEqual(ok.json.clusters, []);
+  assert.deepEqual(ok.json.clusterSummary.clusters, 0);
+
+  const blocked = await post('/api/audit', {
+    rows: 1, cols: 3, labels: {},
+    steps: [
+      { axis: 'v', line: 1, dir: 'r' },
+      { axis: 'v', line: 2, dir: 'l' }
+    ]
+  });
+  assert.equal(blocked.json.ok, false);
+  assert.ok(!('clusters' in blocked.json), '审计中止不伪造簇');
+});
+
+test('保存方案：问题簇由服务端重算随版本快照保存，客户端无法注入', async () => {
+  const body = {
+    name: '簇快照方案', rows: 2, cols: 2, labels: {}, steps: STEPS,
+    auditClusters: [{ id: 'C999', ruleId: 'fake', members: [], memberKeys: ['x'] }]
+  };
+  const saved = await post('/api/plans', body);
+  assert.equal(saved.status, 200);
+  assert.ok(Array.isArray(saved.json.plan.auditClusters));
+  assert.ok(saved.json.plan.auditClusters.length > 0);
+  assert.ok(!saved.json.plan.auditClusters.some((c) => String(c.id) === 'C999'));
+  assert.ok(saved.json.plan.auditClusters.every((c) =>
+    ['duplicate_page', 'split_stacks', 'inverted_page', 'blank_page',
+      'uncovered_cell', 'capacity_mismatch', 'capacity_multiple'].includes(c.ruleId)));
+  // 版本快照中同样可读
+  const snap = await fetchJson2(
+    `/api/plans/${encodeURIComponent(saved.json.id)}/versions/${saved.json.version}`);
+  assert.deepEqual(snap.snapshot.auditClusters, saved.json.plan.auditClusters);
+  // 版本列表摘要带簇计数
+  const versions = await fetchJson2(`/api/plans/${encodeURIComponent(saved.json.id)}/versions`);
+  const row = versions.items.find((v) => v.version === saved.json.version);
+  assert.equal(row.auditClusters, saved.json.plan.auditClusters.length);
+  assert.ok(row.auditErrorClusters >= 1);
+});
+
+test('保存方案：连续两版按稳定成员 key 复用簇编号，成员变化入 removed', async () => {
+  const first = await post('/api/plans', {
+    name: '簇复用方案', rows: 2, cols: 2, labels: {}, steps: STEPS
+  });
+  const id = first.json.id;
+  const blankV1 = first.json.plan.auditClusters.find((c) => c.ruleId === 'blank_page');
+  assert.ok(blankV1 && blankV1.memberCount === 8);
+
+  const second = await post('/api/plans', {
+    id, name: '簇复用方案', rows: 2, cols: 2,
+    labels: { '0,1': { front: '6', back: '' } }, steps: STEPS
+  });
+  const blankV2 = second.json.plan.auditClusters.find((c) => c.id === blankV1.id);
+  assert.ok(blankV2, '成员仍有交集 → 簇编号必须复用');
+  assert.equal(blankV2.memberCount, 7);
+  assert.deepEqual(blankV2.removed.map((m) => m.key), ['blank_page|0,1|front']);
+  assert.equal(second.json.version, first.json.version + 1);
+});
+
+async function fetchJson2(p) {
+  const resp = await fetch(base + p);
+  return resp.json();
+}
+
 // ---------- 书帖爬移补偿 ----------
 test('POST /api/creep-compensation：合法折帖返回逐叶偏移、书脊与最大补偿', async () => {
   const r = await post('/api/creep-compensation', {

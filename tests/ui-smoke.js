@@ -27,7 +27,17 @@ function makeEl(id) {
     querySelectorAll() { return []; },
     removeAttribute() {}, setAttribute() {},
     options: [],
-    classList: { add() {}, remove() {}, contains() { return false; } },
+    classList: {
+      _set: new Set(),
+      add(c) { this._set.add(c); },
+      remove(c) { this._set.delete(c); },
+      toggle(c, force) {
+        const on = force === undefined ? !this._set.has(c) : !!force;
+        if (on) this._set.add(c); else this._set.delete(c);
+        return on;
+      },
+      contains(c) { return this._set.has(c); }
+    },
     getContext: () => ({
       setTransform() {}, clearRect() {}, save() {}, restore() {},
       beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, fill() {},
@@ -69,6 +79,8 @@ const ids = ['rowsInput', 'colsInput', 'createGridBtn', 'axisSelect', 'lineSelec
   'duplexCloseBtn', 'plateFrontMeta', 'plateBackMeta', 'plateFrontSheet',
   'plateBackSheet',
   'auditCard', 'auditVerdict', 'auditStatus', 'auditFindings', 'auditExportBtn',
+  'auditToolbar', 'auditViewFindings', 'auditViewClusters',
+  'auditClusterSeverity', 'auditClusters',
   'creepCard', 'creepThickness', 'creepBleed', 'creepApplyBtn', 'creepClearBtn',
   'creepStatus', 'creepSummary', 'creepApplied', 'creepTableWrap', 'creepRows',
   'annotationCard', 'annoOpenOnly', 'annoSeverityFilter', 'annoFaceFilter',
@@ -549,6 +561,67 @@ assert.ok(auditIds.has('uncovered_cell'));
 assert.ok(auditIds.has('inverted_page'));
 assert.ok(/需修订/.test(els.auditVerdict.textContent));
 assert.ok(/错误/.test(els.auditStatus.textContent));
+
+// ---------- 审计问题簇：只读派生视图 ----------
+assert.ok(ui.audit.clusters.length > 0, '重算后应形成问题簇');
+assert.ok(ui.audit.clusters.every((c) => /^C\d+$/.test(c.id)), '簇编号为 C<n>');
+assert.ok(ui.audit.clusters.some((c) => c.ruleId === 'inverted_page'),
+  '同一规则相邻槽位/共享原格的倒置结果应合并成簇');
+assert.ok(ui.audit.clusters.every((c) => c.members.length === c.memberCount));
+// 簇保留成员严重级别、槽位与说明
+const invCluster = ui.audit.clusters.find((c) => c.ruleId === 'inverted_page');
+assert.ok(invCluster.members.every((m) =>
+  m.severity === 'error' && m.slot > 0 && m.cell && m.message));
+assert.equal(invCluster.severity, 'error', '簇严重级别取成员最高级别');
+
+// 切到簇视图：簇列表显示、逐条列表隐藏
+ui.setAuditView('clusters');
+assert.equal(els.auditClusters.hidden, false);
+assert.equal(els.auditFindings.hidden, true);
+
+// 严重级别筛选：仅错误时警告簇被过滤
+els.auditClusterSeverity.value = 'error';
+els.auditClusterSeverity.dispatch('change', { target: els.auditClusterSeverity });
+const visibleIds = els.auditClusters.__children.map((li) => li.dataset.clusterId);
+assert.ok(visibleIds.length > 0);
+assert.ok(visibleIds.every((id) =>
+  ui.audit.clusters.find((c) => c.id === id).severity === 'error'),
+  '仅错误筛选下不出现警告簇');
+els.auditClusterSeverity.value = 'all';
+els.auditClusterSeverity.dispatch('change', { target: els.auditClusterSeverity });
+
+// 点簇联动：选中簇 → 画布映射命中其全部受影响原格；再点取消
+const target = ui.audit.clusters.find((c) => c.ruleId === 'inverted_page');
+ui.selectAuditCluster(target.id);
+assert.equal(ui.selectedAuditCluster().id, target.id);
+const amap = ui.currentAuditClusterMap(ui.replay.state);
+const highlighted = new Set([...amap.values()].flatMap((e) => [...e.origins]));
+for (const cell of target.cells) assert.ok(highlighted.has(cell), `簇原格 ${cell} 应高亮`);
+ui.selectAuditCluster(target.id);
+assert.equal(ui.selectedAuditCluster(), null);
+
+// 编号复用：重算（计划未变）后簇 id 保持不变
+const beforeIds = ui.audit.clusters.map((c) => c.id + ':' + c.memberKeys.join(','));
+ui.render();
+const afterIds = ui.audit.clusters.map((c) => c.id + ':' + c.memberKeys.join(','));
+assert.deepEqual(afterIds, beforeIds, '同内容重算簇编号稳定');
+
+// 成员变化：给四成员空白簇中的 0,1 正面补页码 → 簇存活、编号复用并报移除成员
+const blankBefore = ui.audit.clusters.find((c) =>
+  c.ruleId === 'blank_page' && c.cells.includes('0,1') && c.cells.includes('1,1'));
+assert.ok(blankBefore, '修改前存在含 0,1/1,1 的四成员空白簇');
+const beforeCount = blankBefore.memberCount;
+ui.plan.labels['0,1'] = { front: '6', back: '' };
+ui.render();
+const sameBlank = ui.audit.clusters.find((c) => c.id === blankBefore.id);
+assert.ok(sameBlank, '仍有存活成员的同身份簇应复用旧编号');
+assert.equal(sameBlank.memberCount, beforeCount - 1);
+assert.ok(sameBlank.removed.some((m) => m.cell === '0,1' && m.face === 'front'),
+  '消失成员应在 removed 中列出');
+// 簇内剩余成员经相邻槽位/共享原格仍连成一簇，未被错误拆散
+assert.deepEqual(sameBlank.cells.sort(), ['0,1', '1,1']);
+
+ui.setAuditView('findings');
 
 // 非法步骤：审计中止，仅报告首个错误，不展示后续结论
 els.rowsInput.value = '1'; els.colsInput.value = '3';
