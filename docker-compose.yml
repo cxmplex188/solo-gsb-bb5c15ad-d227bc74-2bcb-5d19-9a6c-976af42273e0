@@ -1,0 +1,24 @@
+services:
+  fold-proofing:
+    build: .
+    image: fold-proofing:latest
+    container_name: fold-proofing
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - DATA_DIR=/app/data
+    volumes:
+      # 方案（含标签 / 备注 / 校样批注 / 爬移补偿）与不可变版本快照
+      # （<id>.versions/）持久化命名卷：删除容器不丢数据、不改写历史
+      - fold-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  fold-data:

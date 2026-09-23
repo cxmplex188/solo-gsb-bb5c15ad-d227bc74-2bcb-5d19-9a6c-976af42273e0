@@ -1,0 +1,16 @@
+{
+  "name": "fold-proofing",
+  "version": "1.0.0",
+  "description": "折页阅读顺序校样 Web 应用：网格建格、正反面标注页码、逐步折叠模拟与阅读顺序输出",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test tests/"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

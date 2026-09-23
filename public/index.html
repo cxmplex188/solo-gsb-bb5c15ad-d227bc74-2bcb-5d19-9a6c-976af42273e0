@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>折页阅读顺序校样</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>折页阅读顺序校样 <small>Fold Reading-Order Proofing</small></h1>
+    <div class="plan-name">
+      <input id="planName" type="text" value="未命名方案" maxlength="40" />
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- 左：方案 / 网格 / 折叠控制 -->
+    <aside class="panel" id="leftPanel">
+      <section class="card">
+        <h2>1. 行列纸格</h2>
+        <div class="row">
+          <label>行数
+            <input id="rowsInput" type="number" min="1" max="12" value="2" />
+          </label>
+          <label>列数
+            <input id="colsInput" type="number" min="1" max="12" value="2" />
+          </label>
+          <button id="createGridBtn" class="primary">创建网格</button>
+        </div>
+        <p class="hint">点击画布中的纸格可编辑每片叶子的<b>正/反面页码</b>（留空为空白页）。</p>
+      </section>
+
+      <section class="card">
+        <h2>2. 添加折叠步骤</h2>
+        <div class="row">
+          <label>折线
+            <select id="axisSelect">
+              <option value="v">竖直线（左右折）</option>
+              <option value="h">水平线（上下折）</option>
+            </select>
+          </label>
+          <label>位置
+            <select id="lineSelect"></select>
+          </label>
+        </div>
+        <div class="row fold-btns">
+          <button data-dir="l" class="fold">◀ 向左折</button>
+          <button data-dir="r" class="fold">向右折 ▶</button>
+          <button data-dir="u" class="fold">▲ 向上折</button>
+          <button data-dir="d" class="fold">▼ 向下折</button>
+        </div>
+        <p class="hint">也可直接点击画布边缘的箭头。非法折线显示为红色虚线，点击会标出冲突纸格。
+          “向左折”指右侧纸瓣向左翻过折线，其余类推。</p>
+        <div id="foldError" class="error-box" hidden></div>
+      </section>
+
+      <section class="card">
+        <h2>3. 方案存取</h2>
+        <div class="meta-edit">
+          <label class="meta-tags-label">标签（0～8 个，单个 ≤20 字符，回车/点“添加”追加，点 × 删除）
+            <div class="tag-input-row">
+              <input id="tagInput" type="text" maxlength="20" placeholder="如：骑马钉 / A4 / 待复核" />
+              <button id="tagAddBtn" type="button">添加</button>
+              <button id="tagClearBtn" type="button" class="danger-link">清除全部标签</button>
+            </div>
+          </label>
+          <div id="tagChips" class="tag-chips"></div>
+          <div id="tagCountHint" class="hint">0 / 8 个标签</div>
+          <label>备注（≤500 字符）
+            <textarea id="planNote" rows="2" maxlength="500" placeholder="该折帖的备注：工艺、客户、复核状态等"></textarea>
+          </label>
+        </div>
+        <div class="row wrap">
+          <button id="saveBtn" class="primary">保存到服务器</button>
+          <button id="exportBtn">导出 JSON</button>
+          <button id="importBtn">导入 JSON</button>
+          <input id="importFile" type="file" accept="application/json,.json" hidden />
+        </div>
+        <div class="row">
+          <button id="loadListBtn">已存方案…</button>
+          <button id="reviewVersionsBtn" disabled>版本差异审阅…</button>
+          <button id="deletePlanBtn" class="danger" hidden>删除当前存档</button>
+        </div>
+        <div id="planFilter" class="plan-filter" hidden>
+          <div class="plan-filter-row">
+            <input id="filterTags" type="text" placeholder="标签交集，逗号分隔，如：骑马钉,A4" />
+            <input id="filterQ" type="text" placeholder="名称关键词" />
+            <select id="filterSince">
+              <option value="">全部时间</option>
+              <option value="86400000">最近 1 天</option>
+              <option value="604800000">最近 7 天</option>
+              <option value="2592000000">最近 30 天</option>
+            </select>
+            <button id="filterApplyBtn" type="button" class="primary">筛选</button>
+            <button id="filterResetBtn" type="button">清除筛选</button>
+          </div>
+          <div id="planFilterMsg" class="hint"></div>
+        </div>
+        <ul id="planList" class="plan-list" hidden></ul>
+        <div id="saveMsg" class="hint"></div>
+      </section>
+    </aside>
+
+    <!-- 中：画布 -->
+    <section class="panel canvas-panel">
+      <div class="canvas-toolbar">
+        <div class="replay">
+          <button id="firstBtn" title="回到初始">⏮</button>
+          <button id="prevBtn" title="上一步">◀</button>
+          <button id="playBtn" title="播放">▶</button>
+          <button id="nextBtn" title="下一步">▶|</button>
+          <input id="stepSlider" type="range" min="0" max="0" value="0" />
+          <span id="stepLabel" class="step-label">第 0 / 0 步</span>
+        </div>
+        <div class="legend">
+          <span><i class="swatch paper"></i>纸格/叠层</span>
+          <span><i class="swatch move"></i>移动纸瓣</span>
+          <span><i class="swatch conflict"></i>冲突纸格</span>
+          <span><i class="swatch track"></i>追踪面片</span>
+          <span><i class="swatch anno"></i>批注标记</span>
+          <span><i class="swatch diff"></i>差异纸格</span>
+          <span id="statusBadge" class="badge"></span>
+        </div>
+      </div>
+      <div class="canvas-scroll">
+        <canvas id="board" width="900" height="640"></canvas>
+      </div>
+      <p class="hint canvas-hint" id="canvasHint">先在左侧创建行列纸格。</p>
+    </section>
+
+    <!-- 右：步骤与阅读顺序 -->
+    <aside class="panel" id="rightPanel">
+      <section class="card">
+        <h2>折叠步骤</h2>
+        <ol id="stepList" class="step-list"><li class="muted">尚无步骤</li></ol>
+        <div class="row">
+          <button id="delStepBtn" disabled>删除当前步之后</button>
+          <button id="clearStepsBtn" disabled>清空步骤</button>
+        </div>
+      </section>
+
+      <section class="card" id="trackCard">
+        <h2>面片轨迹</h2>
+        <p class="hint">选择<b>原始纸格</b>与正/反面后，系统从第 0 步到末步生成时间线：
+          每一步该片所在格位、叠层中的层序、所选面朝上/朝下与正立/倒置。
+          点击任一节点即联动上方回放定位到该步并高亮该片；首个非法步骤会中断时间线并标明原因。</p>
+        <div class="row">
+          <label>原始纸格
+            <select id="trackCell"></select>
+          </label>
+          <label>追踪的面
+            <select id="trackFace">
+              <option value="front">正面</option>
+              <option value="back">反面</option>
+            </select>
+          </label>
+        </div>
+        <div id="trackStatus" class="hint"></div>
+        <div id="trackTimeline" class="track-timeline" hidden></div>
+      </section>
+
+      <section class="card" id="annotationCard">
+        <h2>校样批注</h2>
+        <p class="hint">在画布点击任一格位（可在弹层中选择该叠中的<b>原始纸格</b>与正/反面）添加批注：
+          记录添加时的回放步、严重级别与正文。批注始终绑定<b>原始面片身份</b>，
+          切换回放步、截断或重排折叠后标记仍定位到正确格位；勾选“仅未解决”只看待办项。</p>
+        <div class="anno-toolbar">
+          <label class="anno-filter-check"><input id="annoOpenOnly" type="checkbox" /> 仅未解决</label>
+          <select id="annoSeverityFilter">
+            <option value="">全部级别</option>
+            <option value="error">严重</option>
+            <option value="warning">警告</option>
+            <option value="info">建议</option>
+          </select>
+          <select id="annoFaceFilter">
+            <option value="">正/反面</option>
+            <option value="front">仅正面</option>
+            <option value="back">仅反面</option>
+          </select>
+        </div>
+        <div id="annoStatus" class="hint">先在左侧创建行列纸格。</div>
+        <ul id="annoList" class="anno-list"></ul>
+      </section>
+
+      <section class="card">
+        <h2>页码朝向</h2>
+        <div id="orientInfo" class="hint">在画布里，倒排页码会旋转 180° 显示，并标注 <span class="inv">⟲倒</span>。</div>
+      </section>
+
+      <section class="card">
+        <h2>最终阅读顺序（封面 → 封底）</h2>
+        <div id="sequenceBox" class="sequence">
+          <span class="muted">完成折叠后在此输出页码序列。</span>
+        </div>
+        <div id="foldState" class="hint"></div>
+      </section>
+
+      <section class="card" id="auditCard">
+        <h2>生产质量审计</h2>
+        <p class="hint">对当前方案<b>完整重放全部步骤</b>后按印刷交付规则检查：
+          空白 / 重复页码、最终分离叠层、倒置页码、未覆盖纸格与折叠后容量异常。
+          审计只读、不改动方案；存在非法步骤时仅报告首个错误。</p>
+        <div class="row">
+          <span id="auditVerdict" class="audit-verdict idle">未审计</span>
+          <button id="auditExportBtn" disabled>导出 JSON 报告</button>
+        </div>
+        <div id="auditStatus" class="hint"></div>
+        <ul id="auditFindings" class="audit-findings" hidden></ul>
+      </section>
+
+      <section class="card" id="duplexCard">
+        <h2>双面印刷版预览</h2>
+        <p class="hint">全部折叠合法并收成单叠后，按当前纸格标注并排生成<b>正面版 / 背面版</b>：
+          背面纸格按所选翻转边镜像，格内页码再按面片朝向旋转，打印后沿所选边翻面、
+          按既有步骤折叠时，阅读顺序与当前回放一致。</p>
+        <div class="row">
+          <label>翻面方式
+            <select id="duplexFlip">
+              <option value="long">长边翻转（沿竖边左右翻）</option>
+              <option value="short">短边翻转（沿横边上下翻）</option>
+            </select>
+          </label>
+          <button id="duplexOpenBtn" class="primary" disabled>生成双面版预览</button>
+        </div>
+        <div id="duplexStatus" class="hint"></div>
+      </section>
+
+      <section class="card" id="creepCard">
+        <h2>书帖爬移补偿</h2>
+        <p class="hint">全部折叠合法并收成单叠后，以最外叶为第 0 层，按
+          <b>补偿量 = 纸厚 × 外侧叶数</b> 把各叶内容沿<b>前口 → 书脊</b>方向内移，
+          并换算为原始纸格正/反面的带符号横向偏移。偏移绝对值超过可用出血的面会标红，
+          此时不可应用。</p>
+        <div class="row">
+          <label>纸张厚度
+            <input id="creepThickness" type="number" min="0" step="0.01" value="0.1" />
+          </label>
+          <label>可用出血
+            <input id="creepBleed" type="number" min="0" step="0.1" value="3" />
+          </label>
+          <button id="creepApplyBtn" class="primary" disabled>应用补偿</button>
+          <button id="creepClearBtn" hidden>清除已应用</button>
+        </div>
+        <div id="creepStatus" class="hint"></div>
+        <div id="creepSummary" class="creep-summary" hidden></div>
+        <div id="creepApplied" class="creep-applied" hidden></div>
+        <div class="creep-table-wrap" id="creepTableWrap" hidden>
+          <table class="creep-table">
+            <thead>
+              <tr>
+                <th>层（外→内）</th><th>原始纸格</th><th>外侧叶数</th>
+                <th>补偿量</th><th>正面偏移</th><th>反面偏移</th>
+              </tr>
+            </thead>
+            <tbody id="creepRows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card" id="pathfindCard">
+        <h2>折手自动寻路</h2>
+        <p class="hint">指定某个<b>原始纸格</b>的正面或反面作为最终朝上的封面，从当前方案的
+          末态出发搜索收成单叠的<b>最短</b>后续折法。仅支持不超过 4×4 的网格，
+          最多 8 个后续步骤、2 秒搜索上限。</p>
+        <div class="row">
+          <label>封面原格
+            <select id="pathCell"></select>
+          </label>
+          <label>朝上的面
+            <select id="pathFace">
+              <option value="front">正面</option>
+              <option value="back">反面</option>
+            </select>
+          </label>
+          <button id="pathSearchBtn" class="primary">搜索最短折法</button>
+        </div>
+        <div id="pathStatus" class="hint"></div>
+        <div id="pathResults" class="path-results" hidden></div>
+      </section>
+
+      <section class="card" id="imposeCard">
+        <h2>自动拼版</h2>
+        <p class="hint">全部折叠合法并收成单叠后，按封面→封底槽位连续填页码，
+          反向写入每个原始纸格的正/反面。预览不会改动当前标注。</p>
+        <div class="row">
+          <label>起始页码
+            <input id="imposeStart" type="number" min="1" step="1" value="1" />
+          </label>
+          <label>成品页数
+            <input id="imposeCount" type="number" min="1" step="1" value="1" />
+          </label>
+          <button id="imposePreviewBtn" class="primary" disabled>生成预览</button>
+        </div>
+        <div id="imposeStatus" class="hint"></div>
+
+        <div id="imposePreview" class="impose-preview" hidden>
+          <div id="imposeSummary" class="impose-summary"></div>
+          <div id="imposeOverwrite" class="impose-overwrite" hidden></div>
+          <div class="impose-table-wrap">
+            <table class="impose-table">
+              <thead>
+                <tr><th>槽位</th><th>页码</th><th>原始纸格 · 面</th><th>朝向</th></tr>
+              </thead>
+              <tbody id="imposeRows"></tbody>
+            </table>
+          </div>
+          <div class="row right">
+            <button id="imposeCancelBtn">取消</button>
+            <button id="imposeConfirmBtn" class="primary">确认写入</button>
+          </div>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <!-- 双面印刷版预览（打印时仅保留此处，正面版、背面版各占一页） -->
+  <div id="duplexOverlay" class="duplex-overlay" hidden>
+    <div class="duplex-screenbar no-print">
+      <b>双面印刷版预览</b>
+      <label>翻面方式
+        <select id="duplexFlipOverlay">
+          <option value="long">长边翻转（沿竖边左右翻）</option>
+          <option value="short">短边翻转（沿横边上下翻）</option>
+        </select>
+      </label>
+      <span id="duplexScreenNote" class="hint"></span>
+      <span class="duplex-bar-spacer"></span>
+      <button id="duplexPrintBtn" class="primary">打印 / 另存 PDF</button>
+      <button id="duplexCloseBtn">关闭预览</button>
+    </div>
+    <div id="duplexPrintArea" class="duplex-print-area">
+      <section class="plate-page" id="plateFrontPage">
+        <header class="plate-head">
+          <h3>正面版（第 1 印刷面）</h3>
+          <span class="plate-meta" id="plateFrontMeta"></span>
+        </header>
+        <div class="plate-sheet" id="plateFrontSheet"></div>
+      </section>
+      <section class="plate-page" id="plateBackPage">
+        <header class="plate-head">
+          <h3>背面版（第 2 印刷面）</h3>
+          <span class="plate-meta" id="plateBackMeta"></span>
+        </header>
+        <div class="plate-sheet" id="plateBackSheet"></div>
+      </section>
+    </div>
+  </div>
+
+  <!-- 版本差异审阅覆盖层 -->
+  <div id="reviewOverlay" class="review-overlay" hidden>
+    <div class="review-bar no-print">
+      <b>版本差异审阅</b>
+      <label class="review-select-label">版本 A（旧）
+        <select id="reviewFromSel"></select>
+      </label>
+      <span class="review-arrow">→</span>
+      <label class="review-select-label">版本 B（新）
+        <select id="reviewToSel"></select>
+      </label>
+      <span id="reviewSummary" class="review-summary"></span>
+      <span class="duplex-bar-spacer"></span>
+      <button id="reviewSwapBtn" title="交换 A / B">⇄ 交换</button>
+      <button id="reviewCloseBtn">关闭审阅</button>
+    </div>
+    <div class="review-body">
+      <aside class="review-diff-panel">
+        <div id="reviewMsg" class="hint"></div>
+        <div id="reviewDiffList" class="review-diff-list"></div>
+      </aside>
+      <section class="review-main">
+        <div id="reviewBanner" class="review-banner" hidden>
+          <div id="reviewBannerText" class="review-banner-text"></div>
+          <div class="review-banner-actions">
+            <button id="reviewExitViewBtn">返回差异列表</button>
+            <button id="reviewRestoreBtn" class="primary">恢复此版本为当前草稿</button>
+          </div>
+        </div>
+        <p class="hint" id="reviewHint">选择同一方案的两个版本后在此展示差异；点击任一差异项可只读查看对应版本并联动回放。</p>
+      </section>
+    </div>
+  </div>
+
+  <!-- 恢复历史版本确认弹层 -->
+  <div id="restoreConfirm" class="modal" hidden>
+    <div class="modal-body">
+      <h3>恢复历史版本</h3>
+      <div id="restoreConfirmText" class="hint"></div>
+      <div id="restoreConfirmWarn" class="error-box" hidden></div>
+      <div class="row right">
+        <button id="restoreCancelBtn">取消</button>
+        <button id="restoreOkBtn" class="primary">确认恢复</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 纸格页码编辑弹层 -->
+  <div id="cellEditor" class="modal" hidden>
+    <div class="modal-body">
+      <h3>编辑面片页码 <small id="editorOrigin"></small></h3>
+      <div id="editorRows"></div>
+      <div class="row right">
+        <button id="editorCancel">取消</button>
+        <button id="editorOk" class="primary">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 校样批注编辑弹层 -->
+  <div id="annoEditor" class="modal" hidden>
+    <div class="modal-body anno-modal-body">
+      <h3>校样批注 <small id="annoEditorTarget"></small></h3>
+      <div class="anno-edit-meta" id="annoEditorMeta"></div>
+      <div class="row">
+        <label>严重级别
+          <select id="annoSeverity">
+            <option value="error">严重（须修订）</option>
+            <option value="warning">警告（需确认）</option>
+            <option value="info">建议（可保留）</option>
+          </select>
+        </label>
+        <label class="anno-step-label">回放步
+          <span id="annoStepText" class="anno-step-text">第 0 步</span>
+        </label>
+      </div>
+      <label class="anno-text-label">批注正文（≤500 字符）
+        <textarea id="annoText" rows="3" maxlength="500" placeholder="描述该校样问题：位置、现象、处理意见…"></textarea>
+      </label>
+      <div id="annoCharHint" class="hint">0 / 500</div>
+      <div id="annoEditorMsg" class="error-box" hidden></div>
+      <div class="row right">
+        <button id="annoDeleteBtn" class="danger" hidden>删除批注</button>
+        <button id="annoCancelBtn">取消</button>
+        <button id="annoSaveBtn" class="primary">保存批注</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="foldEngine.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
